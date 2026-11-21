@@ -127,6 +127,7 @@ export function VoiceProvider({ children }: { children: React.ReactNode }) {
   const audioElRef = useRef<HTMLAudioElement | null>(null);
   const audioUrlRef = useRef<string | null>(null);
   const ttsAbortRef = useRef<AbortController | null>(null);
+  const messagesRef = useRef<CopilotMessage[]>([]);
   const sendMessageRef = useRef<(text: string) => Promise<void>>(async () => {});
 
   const micSupported =
@@ -284,6 +285,10 @@ export function VoiceProvider({ children }: { children: React.ReactNode }) {
       const targetTicket = ticketNumber !== undefined ? ticketNumber : lockedTicketNumber;
       if (targetTicket !== undefined) setLockedTicketNumber(targetTicket);
       setError(null);
+      setAutoplayBlocked(false);
+      setInterimTranscript('');
+      setLastSpokenText(null);
+      setLastVisionAnalysis(null);
       try {
         const created = await fetchJson<VoiceSession>('/api/sessions/start', {
           method: 'POST',
@@ -292,8 +297,7 @@ export function VoiceProvider({ children }: { children: React.ReactNode }) {
             ticket_number: targetTicket,
           }),
         });
-        setSession(created);
-        setMessages([
+        const initialMsgs: CopilotMessage[] = [
           {
             id: `msg-init-${Date.now()}`,
             role: 'assistant',
@@ -302,7 +306,10 @@ export function VoiceProvider({ children }: { children: React.ReactNode }) {
               : 'FieldPilot Copilot active. Name a ticket number or describe the field issue.',
             timestamp: new Date().toISOString(),
           },
-        ]);
+        ];
+        messagesRef.current = initialMsgs;
+        setSession(created);
+        setMessages(initialMsgs);
         setToolTimeline([]);
         setRagSources([]);
         await refreshStore();
@@ -330,17 +337,27 @@ export function VoiceProvider({ children }: { children: React.ReactNode }) {
       mediaRecorderRef.current.stop();
     }
     setIsListening(false);
-    if (!session) return;
+    const endingSession = session;
+    messagesRef.current = [];
+    setSession(null);
+    setMessages([]);
+    setToolTimeline([]);
+    setRagSources([]);
+    setLastVisionAnalysis(null);
+    setLastSpokenText(null);
+    setAutoplayBlocked(false);
+    setInterimTranscript('');
+    setError(null);
+    if (!endingSession) return;
     try {
-      await fetchJson(`/api/sessions/${session.id}/end`, {
+      await fetchJson(`/api/sessions/${endingSession.id}/end`, {
         method: 'POST',
         body: JSON.stringify({ summary: `Session on ${lockedTicketNumber ?? 'General'} completed.` }),
       });
-      setSession(null);
       await refreshStore();
-      pushToast({ title: 'Copilot session saved', body: 'Transcript & impact metrics recorded.', tone: 'success' });
+      pushToast({ title: 'Copilot session saved', body: 'Ready for a new conversation.', tone: 'success' });
     } catch {
-      setSession(null);
+      // session already reset cleanly on client
     }
   }, [session, lockedTicketNumber, refreshStore, stopSpeaking, stopMeterAndStream, pushToast]);
 
@@ -364,32 +381,48 @@ export function VoiceProvider({ children }: { children: React.ReactNode }) {
       if (pendingConf) {
         const lower = text.toLowerCase();
         if (/^(yes|confirm|go ahead|approved?|proceed|do it)\b/.test(lower)) {
-          setMessages((prev) => [
-            ...prev,
-            { id: `u-${Date.now()}`, role: 'user', text, timestamp: new Date().toISOString() },
-          ]);
+          const userConfMsg: CopilotMessage = {
+            id: `u-${Date.now()}`,
+            role: 'user',
+            text,
+            timestamp: new Date().toISOString(),
+          };
+          messagesRef.current = [...messagesRef.current, userConfMsg];
+          setMessages(messagesRef.current);
           const res = (await resolveConfirmation(pendingConf.id, 'confirmed', 'voice')) as {
             confirmation: ConfirmationRequest;
           };
           const replyText = `Confirmed and executed: ${res.confirmation.summary_text}`;
-          setMessages((prev) => [
-            ...prev,
-            { id: `a-${Date.now()}`, role: 'assistant', text: replyText, timestamp: new Date().toISOString() },
-          ]);
+          const replyConfMsg: CopilotMessage = {
+            id: `a-${Date.now()}`,
+            role: 'assistant',
+            text: replyText,
+            timestamp: new Date().toISOString(),
+          };
+          messagesRef.current = [...messagesRef.current, replyConfMsg];
+          setMessages(messagesRef.current);
           void speakText(replyText);
           return;
         }
         if (/^(no|cancel|abort|stop|reject)\b/.test(lower)) {
-          setMessages((prev) => [
-            ...prev,
-            { id: `u-${Date.now()}`, role: 'user', text, timestamp: new Date().toISOString() },
-          ]);
+          const userCancelMsg: CopilotMessage = {
+            id: `u-${Date.now()}`,
+            role: 'user',
+            text,
+            timestamp: new Date().toISOString(),
+          };
+          messagesRef.current = [...messagesRef.current, userCancelMsg];
+          setMessages(messagesRef.current);
           await resolveConfirmation(pendingConf.id, 'cancelled', 'voice');
           const replyText = 'Cancelled pending action. No inventory or state changes were made.';
-          setMessages((prev) => [
-            ...prev,
-            { id: `a-${Date.now()}`, role: 'assistant', text: replyText, timestamp: new Date().toISOString() },
-          ]);
+          const replyCancelMsg: CopilotMessage = {
+            id: `a-${Date.now()}`,
+            role: 'assistant',
+            text: replyText,
+            timestamp: new Date().toISOString(),
+          };
+          messagesRef.current = [...messagesRef.current, replyCancelMsg];
+          setMessages(messagesRef.current);
           void speakText(replyText);
           return;
         }
@@ -406,7 +439,8 @@ export function VoiceProvider({ children }: { children: React.ReactNode }) {
         text,
         timestamp: new Date().toISOString(),
       };
-      const nextHistory = [...messages, userMsg];
+      const nextHistory = [...messagesRef.current, userMsg];
+      messagesRef.current = nextHistory;
       setMessages(nextHistory);
       setIsThinking(true);
 
@@ -435,7 +469,9 @@ export function VoiceProvider({ children }: { children: React.ReactNode }) {
           text: data.reply,
           timestamp: new Date().toISOString(),
         };
-        setMessages((prev) => [...prev, aiMsg]);
+        const updatedMsgs = [...messagesRef.current, aiMsg];
+        messagesRef.current = updatedMsgs;
+        setMessages(updatedMsgs);
 
         if (Array.isArray(data.ragSources) && data.ragSources.length > 0) {
           setRagSources(data.ragSources);
@@ -665,15 +701,14 @@ export function VoiceProvider({ children }: { children: React.ReactNode }) {
           }),
         });
         setLastVisionAnalysis(data.analysis);
-        setMessages((prev) => [
-          ...prev,
-          {
-            id: `vis-${Date.now()}`,
-            role: 'assistant',
-            text: data.analysis,
-            timestamp: new Date().toISOString(),
-          },
-        ]);
+        const visMsg: CopilotMessage = {
+          id: `vis-${Date.now()}`,
+          role: 'assistant',
+          text: data.analysis,
+          timestamp: new Date().toISOString(),
+        };
+        messagesRef.current = [...messagesRef.current, visMsg];
+        setMessages(messagesRef.current);
         await refreshStore();
         void speakText(data.analysis);
         return data.analysis;
