@@ -1,0 +1,6 @@
+{
+  "name": "FieldPilot Service Hub",
+  "description": "Enterprise Field Service Operations & AI Voice Copilot Hub for ticket lifecycle management, SLA governance, spare-parts procurement, and multimodal diagnostics.",
+  "requestFramePermissions": ["microphone", "camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
